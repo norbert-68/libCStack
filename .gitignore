@@ -1,5 +1,4 @@
-﻿################################################################################
-# Diese .gitignore-Datei wurde von Microsoft(R) Visual Studio automatisch erstellt.
-################################################################################
-
-*.db
+﻿/Debug/*/**
+/Release/*/**
+/libCStack.vs/.vs
+/libCStack.vs/*.VC.*
