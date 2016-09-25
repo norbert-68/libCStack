@@ -26,8 +26,12 @@ int main(int argc, char * args[])
 {
 	cstack::StackTrace stacktrace;
 	captureStackTrace(stacktrace);
+	
+	std::cout << "Unformatted StackTrace:" << std::endl;
 	for (std::string frame : stacktrace)
 		std::cout << frame << std::endl;
-	std::cout << std::endl;
-	std::cout << stacktrace << std::endl;
+	
+	std::cout << std::endl
+		      << "Formatted StackTrace:" << std::endl;
+	std::cout << stacktrace;
 }
