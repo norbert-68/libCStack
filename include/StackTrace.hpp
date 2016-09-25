@@ -17,20 +17,38 @@
 #ifndef STACKTRACE_HPP
 #define STACKTRACE_HPP
 
-#include <DWARF.hpp>
+#if (defined __linux__)
 #include <ELF.hpp>
+#define HAVE_DWARF
+#endif
+#if (defined __MACH__)
 #include <MachO.hpp>
+#define HAVE_DWARF
+#endif
+#if (defined HAVE_DWARF)
+#include <DWARF.hpp>
+#endif
+#include <algorithm>
+//#include <cstdint>
 #include <deque>
 #include <iostream>
 #include <iomanip>
-#include <ostream>
+#include <sstream>
 #include <string>
-#include <cstdint>
+#if (defined _WIN32)
+#pragma comment(lib, "Dbghelp.lib")
+#pragma warning(disable: 4091)
+#include <Windows.h>
+#include <DbgHelp.h>
+#undef min
+#endif
 
-namespace common {
+namespace cstack {
 
 /**
  * @brief A StackTrace is a simple vector of strings.
+ * Each formatted line of a stack frame will look like
+ * #frame <em>function</em> "at" <em>sourceDirectory/sourceFile</em> ":" <em>line</em>
  */
 class StackTrace : public std::deque<std::string>
 {
@@ -41,30 +59,18 @@ public:
     /**
      * @brief Takes a snapshot from the current stack trace.
      */
-    virtual void takeSnapshot();
+    virtual void capture();
 
 };
 
+#if 0 //TODO: move to libDWARF
 /**
  * @brief Try to load a DWARF line number program section.
  */
 void debugLine(const std::string & filename, dwarf::LineNumberSection & lineNumberSection);
-
-} // namespace common
-
-/**
- * @brief Prints a StackTrace.
- * The format looks like
- * #frame function() at sourceDirectory/sourceFile:line
- */
-std::ostream & operator<<(std::ostream & stream, const common::StackTrace & right);
-
-namespace common {
+#endif
 
 #if (defined _WIN32)
-#pragma warning(disable: 4091)
-#include <Windows.h>
-#include <DbgHelp.h>
 
 class Win32Static
 {
@@ -73,9 +79,8 @@ public:
     Win32Static()
     {
         mutex = CreateMutex(0, FALSE, 0);
-        currentProcess = GetCurrentProcess();
         SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_LINES);
-        BOOL successful = SymInitialize(currentProcess, 0, TRUE);
+        BOOL successful = SymInitialize(GetCurrentProcess(), 0, TRUE);
         if (!successful)
         {
             char systemText[1024];
@@ -89,12 +94,7 @@ public:
 
     ~Win32Static()
     {
-        SymCleanup(currentProcess);
-    }
-
-    HANDLE getCurrentProcess() const
-    {
-        return currentProcess;
+        SymCleanup(GetCurrentProcess());
     }
 
     HANDLE getMutex() const
@@ -105,13 +105,13 @@ public:
 private:
 
     HANDLE mutex;
-    HANDLE currentProcess;
 
 };
 
-void StackTrace::takeSnapshot()
+void StackTrace::capture()
 {
     static Win32Static win32Static;
+	HANDLE currentProcess = GetCurrentProcess();
     HANDLE currentThread = GetCurrentThread();
     CONTEXT currentContext;
     memset(&currentContext, 0, sizeof(CONTEXT));
@@ -151,33 +151,31 @@ void StackTrace::takeSnapshot()
 #elif (defined _M_IA64)
         DWORD machineType = IMAGE_FILE_MACHINE_IA64;
 #endif
-        BOOL hasFrame = StackWalk64(machineType, win32Static.getCurrentProcess(), currentThread, &stackFrame, &currentContext, 0, 0, 0, 0);
+        BOOL hasFrame = StackWalk64(machineType, currentProcess, currentThread, &stackFrame, &currentContext, 0, 0, 0, 0);
         if (!hasFrame) break;
         ++frames;
 
         psymbolInfo->Name[0] = 0;
-        DWORD64 displacement64;
-        if (frames > ignore && SymFromAddr(win32Static.getCurrentProcess(), stackFrame.AddrPC.Offset, &displacement64, psymbolInfo))
+        if (frames > ignore)
         {
-            IMAGEHLP_LINE64 line;
-            DWORD displacement;
-            line.SizeOfStruct = sizeof(IMAGEHLP_LINE64);
-            if (SymGetLineFromAddr64(win32Static.getCurrentProcess(), stackFrame.AddrPC.Offset, &displacement, &line))
-            {
-                std::ostringstream strstr;
-                strstr << line.FileName << "(" << line.LineNumber << "): " << psymbolInfo->Name;
-                push_back(strstr.str());
-            }
-            else
-            {
-                push_back(psymbolInfo->Name);
-            }
+			std::ostringstream strstr;
+			HMODULE module;
+			char modulePath[MAX_PATH];
+			if (GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, reinterpret_cast<LPCTSTR>(stackFrame.AddrPC.Offset), &module))
+				GetModuleFileNameA(module, modulePath, MAX_PATH);
+			else
+				FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM, NULL, GetLastError(), 0, modulePath, MAX_PATH, 0);
+			DWORD64 displacement64 = 0;
+			SymFromAddr(currentProcess, stackFrame.AddrPC.Offset, &displacement64, psymbolInfo);
+			strstr << modulePath << "(" << psymbolInfo->Name << "+0x" << std::hex << displacement64 << ") [0x" << std::hex << stackFrame.AddrPC.Offset << "]";
+			push_back(strstr.str());
         }
     }
     ReleaseMutex(win32Static.getMutex());
 }
 #endif // _WIN32
 
+#if 0 //TODO: move to libDWARF
 inline void debugLine(const std::string & filename, dwarf::LineNumberSection & lineNumberSection)
 {
     lineNumberSection.clear();
@@ -208,6 +206,7 @@ inline void debugLine(const std::string & filename, dwarf::LineNumberSection & l
         }
     }
 }
+#endif
 
 #if (defined __linux__) || (defined __MACH__)
 #include <execinfo.h>
@@ -240,7 +239,7 @@ inline void StackTrace::takeSnapshot()
 }
 #endif // __linux__ || __MACH__
 
-} // namespace common
+} // namespace cstack
 
 #if (defined __GNUC__)
 #include <cxxabi.h>
@@ -249,11 +248,21 @@ inline void StackTrace::takeSnapshot()
 #include <mach-o/dyld.h>
 #endif
 
-inline std::ostream & operator<<(std::ostream & stream, const common::StackTrace & right)
+/**
+ * @brief Prints a StackTrace.
+ * The line format looks like
+ * #frame <em>function</em> "at" <em>sourceDirectory/sourceFile</em> ":" <em>line</em>, or
+ * #frame <em>symbol</em> "+0x"	<em>offset</em> "at" <em>module</em> "+0x" <em>address</em>.
+ */
+inline std::ostream & operator<<(std::ostream & stream, const cstack::StackTrace & right)
 {
+#if (defined _WIN32)
+	HANDLE currentProcess = GetCurrentProcess();
+#endif
+#if (defined HAVE_DWARF)
     typedef std::map<std::string, dwarf::LineNumberSection> LineNumberSections;
     LineNumberSections lineNumberSections;
-    std::size_t numFrame = 1;
+#endif
 #if (defined __MACH__)
     std::vector<char> executablePath;
     uint32_t pathLength = 512;
@@ -263,24 +272,23 @@ inline std::ostream & operator<<(std::ostream & stream, const common::StackTrace
         executablePath.resize(pathLength);
     } while (_NSGetExecutablePath(executablePath.data(), &pathLength) < 0);
     std::string modulePath = executablePath.data();
-    modulePath.append(".dSYM/Contents/Resources/DWARF/unittest");
+    //TODO: modulePath.append(".dSYM/Contents/Resources/DWARF/unittest");
 #endif
-    for (const std::string & strFrame : right)
+	std::size_t numFrame = 1;
+	for (const std::string & strFrame : right)
     {
         std::string module;
         std::string symbol;
         std::string offset;
         std::string address;
-        std::string sourceLine;
-#ifdef __linux__
-        // in linux a stack frame looks like
+#if (defined __linux__) || (defined _WIN32)
+        // in linux (same as we constructed in StackTrace::capture() for _WIN32) a stack frame looks like
         // module(symbol+0xoffset) [0xaddress]
         std::size_t startSymbol  = strFrame.find('('),
                     startOffset  = strFrame.find("+0x", startSymbol),
                     endSymbol    = strFrame.find(')', startOffset != std::string::npos ? startOffset : startSymbol),
                     startAddress = strFrame.find("[0x", endSymbol != std::string::npos ? endSymbol : 0),
                     endAddress   = strFrame.find(']', startAddress);
-
         module = strFrame.substr(0, std::min(startSymbol, startAddress));
         if (startSymbol != std::string::npos)
         {
@@ -292,10 +300,10 @@ inline std::ostream & operator<<(std::ostream & stream, const common::StackTrace
             address = strFrame.substr(startAddress + 3, endAddress - startAddress - 3);
 #endif
 #if (defined __MACH__)
-        // in MacOSX a stack frame looks like
+        // in MacOS a stack frame looks like
         // module 0xaddress symbol + offset
         std::size_t startAddress = strFrame.find(" 0x"),
-        startSymbol  = strFrame.find(' ', startAddress == std::string::npos ? startAddress : startAddress + 1),
+                    startSymbol  = strFrame.find(' ', startAddress == std::string::npos ? startAddress : startAddress + 1),
                     startOffset  = strFrame.find(" + ", startSymbol);
         module = modulePath;
         if (startAddress != std::string::npos)
@@ -305,63 +313,64 @@ inline std::ostream & operator<<(std::ostream & stream, const common::StackTrace
         if (startOffset != std::string::npos)
             offset = strFrame.substr(startOffset + 3);
 #endif
+		// first trim module and remove any trailing whitespace
         while (!module.empty() && isspace(module.back()))
             module.pop_back();
-        if (!module.empty() && !address.empty())
-        {
-            LineNumberSections::const_iterator itr = lineNumberSections.find(module);
-            while (itr == lineNumberSections.end())
-            {
-                dwarf::LineNumberSection & lineNumberSection = lineNumberSections[module];
-                common::debugLine(module, lineNumberSection);
-                itr = lineNumberSections.find(module);
-            }
-            uint64_t paddress = strtoull(address.c_str(), 0, 16);
-            dwarf::LineNumberSection::AddressIndex::const_iterator atr = itr->second.addressToLine(paddress);
-            while (atr != itr->second.addressIndex.begin() && !(--atr)->second->isStmt);
-            if (atr != itr->second.addressIndex.end())
-                sourceLine = atr->second->getSourceLine();
-        }
+
+		// now try to assemble a stack frame line
+		stream << "#" << std::setw(2) << std::setfill('0') << numFrame << " ";
+
+		if (symbol.empty() || module.empty() || address.empty())
+		{
+			stream << strFrame << std::endl;
+			continue;
+		}
+
 #if (defined __GNUG__)
-        if (!symbol.empty())
-        {
-            std::size_t length = 0;
-            int status = 0;
-            char * demangled = abi::__cxa_demangle(symbol.c_str(), 0, &length, &status);
-            if (demangled && status == 0)
-                symbol.assign(demangled);
-            else
-                symbol.append("+0x").append(offset);
-            if (demangled)
-                free(demangled);
-        }
+		std::size_t length = 0;
+		int status = 0;
+		char * demangled = abi::__cxa_demangle(symbol.c_str(), 0, &length, &status);
+		if (demangled && status == 0)
+			stream << demangled;
+		else
+		{
+			stream << symbol << "+0x" << offset;
+			offset.clear();
+		}
+		if (demangled)
+			free(demangled);
+#else
+		stream << symbol;
 #endif
 
-        // eventually symbol should either be the demangled symbol or symbol+0xoffset
-        //        and module should either be source:line or module [0xaddress]
-        stream << "#" << std::setw(2) << std::setfill('0') << numFrame;
-        if (symbol.empty() && sourceLine.empty())
+		// now try to translate module + address into sourceFile:sourceLine
+		uint64_t iaddress = strtoull(address.c_str(), 0, 16);
+#if (defined HAVE_DWARF)
+        LineNumberSections::const_iterator itr = lineNumberSections.find(module);
+        while (itr == lineNumberSections.end())
         {
-            stream << " " << strFrame;
+            dwarf::LineNumberSection & lineNumberSection = lineNumberSections[module];
+            common::debugLine(module, lineNumberSection);
+            itr = lineNumberSections.find(module);
         }
-        else
-        {
-            if (!symbol.empty())
-                stream << " " << symbol;
-            if (!sourceLine.empty())
-            {
-                stream << " at " << sourceLine;
-            }
-            else if (!module.empty() || !address.empty())
-            {
-                stream << " at ";
-                if (!module.empty())
-                    stream << module;
-                if (!address.empty())
-                    stream << " [0x" << address << "]";
-            }
-        }
-        stream /* << " " << strFrame */ << std::endl;
+        dwarf::LineNumberSection::AddressIndex::const_iterator atr = itr->second.addressToLine(iaddress);
+        while (atr != itr->second.addressIndex.begin() && !(--atr)->second->isStmt);
+        if (atr != itr->second.addressIndex.end())
+			stream << " at " << atr->second->getSourceLine();
+#elif (defined _WIN32)
+		IMAGEHLP_LINE64 line;
+		DWORD displacement = 0;
+		line.SizeOfStruct = sizeof(IMAGEHLP_LINE64);
+		if (SymGetLineFromAddr64(currentProcess, iaddress, &displacement, &line))
+			stream << " at " << line.FileName << ":" << line.LineNumber;
+#endif
+		else
+		{
+			if (!offset.empty())
+				stream << "+0x" << offset;
+			stream << " at " << module << "+0x" << address;
+		}
+        stream << std::endl;
         ++numFrame;
     }
     return stream;
