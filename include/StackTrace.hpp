@@ -211,7 +211,7 @@ inline void debugLine(const std::string & filename, dwarf::LineNumberSection & l
 #if (defined __linux__) || (defined __MACH__)
 #include <execinfo.h>
 
-inline void StackTrace::takeSnapshot()
+inline void StackTrace::capture()
 {
     static const int BUFFER_SIZE = 100;
     void * execBuffer[BUFFER_SIZE];
@@ -221,7 +221,7 @@ inline void StackTrace::takeSnapshot()
         char ** strings = backtrace_symbols(execBuffer, noOfFrames);
         if (strings)
         {
-            for (std::size_t i = 1; i < noOfFrames; ++i)
+            for (std::size_t i = 1; i < static_cast<std::size_t>(noOfFrames); ++i)
             {
                 char * frame = strings[i];
                 // Whenever the stacktrace contains already the frame number, we cannot
