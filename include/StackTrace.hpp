@@ -17,16 +17,9 @@
 #ifndef STACKTRACE_HPP
 #define STACKTRACE_HPP
 
-#if (defined __linux__)
-#include <ELF.hpp>
-#define HAVE_DWARF
-#endif
-#if (defined __MACH__)
-#include <MachO.hpp>
-#define HAVE_DWARF
-#endif
-#if (defined HAVE_DWARF)
+#if (defined __linux__) || (defined __MACH__)
 #include <DWARF.hpp>
+#define HAVE_DWARF
 #endif
 #include <algorithm>
 //#include <cstdint>
@@ -62,13 +55,6 @@ public:
     virtual void capture();
 
 };
-
-#if 0 //TODO: move to libDWARF
-/**
- * @brief Try to load a DWARF line number program section.
- */
-void debugLine(const std::string & filename, dwarf::LineNumberSection & lineNumberSection);
-#endif
 
 #if (defined _WIN32)
 
@@ -174,39 +160,6 @@ void StackTrace::capture()
     ReleaseMutex(win32Static.getMutex());
 }
 #endif // _WIN32
-
-#if 0 //TODO: move to libDWARF
-inline void debugLine(const std::string & filename, dwarf::LineNumberSection & lineNumberSection)
-{
-    lineNumberSection.clear();
-    if (elf::ELFFile::isELF(filename))
-    {
-        elf::ELFFile elfFile;
-        elfFile.open(filename);
-        std::deque<elf::ELFSection> sections;
-        elfFile.findSections(dwarf::SN_DEBUG_LINE, sections);
-        for (const elf::ELFSection & section : sections)
-        {
-            lineNumberSection.deserialize(section.binaryContent, section.binaryLength,
-                                          elfFile.header.elfEndianness == elf::ELF_DATA2LSB,
-                                          elfFile.header.elfClass == elf::ELF_CLASS64);
-        }
-    }
-    else if (macho::MachOFile::isMachO(filename))
-    {
-        macho::MachOFile machoFile;
-        machoFile.open(filename);
-        std::deque<const macho::MachOSection*> sections;
-        machoFile.findSections(dwarf::SN_DEBUG_LINE_MACHO, sections);
-        for (const macho::MachOSection * section : sections)
-        {
-            lineNumberSection.deserialize(section->data(), section->size(),
-                                          machoFile.header.isLittleEndian(),
-                                          machoFile.header.is64Bit());
-        }
-    }
-}
-#endif
 
 #if (defined __linux__) || (defined __MACH__)
 #include <execinfo.h>
@@ -350,7 +303,7 @@ inline std::ostream & operator<<(std::ostream & stream, const cstack::StackTrace
         while (itr == lineNumberSections.end())
         {
             dwarf::LineNumberSection & lineNumberSection = lineNumberSections[module];
-            common::debugLine(module, lineNumberSection);
+            lineNumberSection.deserialize(module);
             itr = lineNumberSections.find(module);
         }
         dwarf::LineNumberSection::AddressIndex::const_iterator atr = itr->second.addressToLine(iaddress);
