@@ -3,3 +3,4 @@
 /Release/*/**
 /libCStack.vs/.vs
 /libCStack.vs/*.VC.*
+/Debug/

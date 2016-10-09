@@ -17,19 +17,11 @@
 #ifndef STACKTRACE_HPP
 #define STACKTRACE_HPP
 
-#if (defined __linux__)
-#include <ELF.hpp>
-#define HAVE_DWARF
-#endif
-#if (defined __MACH__)
-#include <MachO.hpp>
-#define HAVE_DWARF
-#endif
-#if (defined HAVE_DWARF)
+#if (defined __linux__) || (defined __MACH__)
 #include <DWARF.hpp>
+#define HAVE_DWARF
 #endif
 #include <algorithm>
-//#include <cstdint>
 #include <deque>
 #include <iostream>
 #include <iomanip>
@@ -62,13 +54,6 @@ public:
     virtual void capture();
 
 };
-
-#if 0 //TODO: move to libDWARF
-/**
- * @brief Try to load a DWARF line number program section.
- */
-void debugLine(const std::string & filename, dwarf::LineNumberSection & lineNumberSection);
-#endif
 
 #if (defined _WIN32)
 
@@ -174,39 +159,6 @@ void StackTrace::capture()
     ReleaseMutex(win32Static.getMutex());
 }
 #endif // _WIN32
-
-#if 0 //TODO: move to libDWARF
-inline void debugLine(const std::string & filename, dwarf::LineNumberSection & lineNumberSection)
-{
-    lineNumberSection.clear();
-    if (elf::ELFFile::isELF(filename))
-    {
-        elf::ELFFile elfFile;
-        elfFile.open(filename);
-        std::deque<elf::ELFSection> sections;
-        elfFile.findSections(dwarf::SN_DEBUG_LINE, sections);
-        for (const elf::ELFSection & section : sections)
-        {
-            lineNumberSection.deserialize(section.binaryContent, section.binaryLength,
-                                          elfFile.header.elfEndianness == elf::ELF_DATA2LSB,
-                                          elfFile.header.elfClass == elf::ELF_CLASS64);
-        }
-    }
-    else if (macho::MachOFile::isMachO(filename))
-    {
-        macho::MachOFile machoFile;
-        machoFile.open(filename);
-        std::deque<const macho::MachOSection*> sections;
-        machoFile.findSections(dwarf::SN_DEBUG_LINE_MACHO, sections);
-        for (const macho::MachOSection * section : sections)
-        {
-            lineNumberSection.deserialize(section->data(), section->size(),
-                                          machoFile.header.isLittleEndian(),
-                                          machoFile.header.is64Bit());
-        }
-    }
-}
-#endif
 
 #if (defined __linux__) || (defined __MACH__)
 #include <execinfo.h>
@@ -320,57 +272,61 @@ inline std::ostream & operator<<(std::ostream & stream, const cstack::StackTrace
 		// now try to assemble a stack frame line
 		stream << "#" << std::setw(2) << std::setfill('0') << numFrame << " ";
 
-		if (symbol.empty() || module.empty() || address.empty())
+		if (!symbol.empty())
 		{
-			stream << strFrame << std::endl;
-			continue;
-		}
-
 #if (defined __GNUG__)
-		std::size_t length = 0;
-		int status = 0;
-		char * demangled = abi::__cxa_demangle(symbol.c_str(), 0, &length, &status);
-		if (demangled && status == 0)
-			stream << demangled;
-		else
-		{
-			stream << symbol << "+0x" << offset;
-			offset.clear();
-		}
-		if (demangled)
-			free(demangled);
+            std::size_t length = 0;
+            int status = 0;
+            char * demangled = abi::__cxa_demangle(symbol.c_str(), 0, &length, &status);
+            if (demangled && status == 0)
+                stream << demangled;
+            else
+            {
+                stream << symbol << "+0x" << offset;
+                offset.clear();
+            }
+            if (demangled)
+                free(demangled);
 #else
-		stream << symbol;
+            stream << symbol;
 #endif
-
-		// now try to translate module + address into sourceFile:sourceLine
-		uint64_t iaddress = strtoull(address.c_str(), 0, 16);
-#if (defined HAVE_DWARF)
-        LineNumberSections::const_iterator itr = lineNumberSections.find(module);
-        while (itr == lineNumberSections.end())
-        {
-            dwarf::LineNumberSection & lineNumberSection = lineNumberSections[module];
-            common::debugLine(module, lineNumberSection);
-            itr = lineNumberSections.find(module);
-        }
-        dwarf::LineNumberSection::AddressIndex::const_iterator atr = itr->second.addressToLine(iaddress);
-        while (atr != itr->second.addressIndex.begin() && !(--atr)->second->isStmt);
-        if (atr != itr->second.addressIndex.end())
-			stream << " at " << atr->second->getSourceLine();
-#elif (defined _WIN32)
-		IMAGEHLP_LINE64 line;
-		DWORD displacement = 0;
-		line.SizeOfStruct = sizeof(IMAGEHLP_LINE64);
-		if (SymGetLineFromAddr64(currentProcess, iaddress, &displacement, &line))
-			stream << " at " << line.FileName << ":" << line.LineNumber;
-#endif
-		else
-		{
-			if (!offset.empty())
-				stream << "+0x" << offset;
-			stream << " at " << module << "+0x" << address;
 		}
-        stream << std::endl;
+
+        if (module.empty() || address.empty())
+        {
+            stream << strFrame << std::endl;
+        }
+        else
+        {
+            // now try to translate module + address into sourceFile:sourceLine
+            uint64_t iaddress = strtoull(address.c_str(), 0, 16);
+#if (defined HAVE_DWARF)
+            LineNumberSections::const_iterator itr = lineNumberSections.find(module);
+            while (itr == lineNumberSections.end())
+            {
+                dwarf::LineNumberSection & lineNumberSection = lineNumberSections[module];
+                lineNumberSection.deserialize(module);
+                itr = lineNumberSections.find(module);
+            }
+            dwarf::LineNumberSection::AddressIndex::const_iterator atr = itr->second.addressToLine(iaddress);
+            while (atr != itr->second.addressIndex.begin() && !(--atr)->second->isStmt);
+            if (atr != itr->second.addressIndex.end())
+                stream << " at " << atr->second->getSourceLine();
+#elif (defined _WIN32)
+            IMAGEHLP_LINE64 line;
+            DWORD displacement = 0;
+            line.SizeOfStruct = sizeof(IMAGEHLP_LINE64);
+            if (SymGetLineFromAddr64(currentProcess, iaddress, &displacement, &line))
+                stream << " at " << line.FileName << ":" << line.LineNumber;
+#endif
+            else
+            {
+                if (!offset.empty())
+                    stream << "+0x" << offset;
+                stream << " at " << module << "+0x" << address;
+            }
+            stream << std::endl;
+        }
         ++numFrame;
     }
     return stream;
